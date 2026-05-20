@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
+	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,9 +32,11 @@ func SetJWTSecret(secret string) {
 	}
 }
 
-func GetUserByToken(rdb *redis.Client, tokenString string) (*UserAuth, error) {
+// GetUserByToken 根据 Token 从 Redis 获取玩家和商户数据
+func GetUserByToken(rdb *redis.Client, token string) (*UserAuth, error) {
 	ctx := context.Background()
-	key := tokenString
+	key := token
+
 	exists, err := rdb.Exists(ctx, key).Result()
 	if err != nil {
 		return nil, err
@@ -41,15 +44,39 @@ func GetUserByToken(rdb *redis.Client, tokenString string) (*UserAuth, error) {
 	if exists == 0 {
 		return nil, errors.New("token 不存在或已过期")
 	}
+
+	userData, err := rdb.HGetAll(ctx, key).Result()
+	if err != nil {
+		return nil, fmt.Errorf("获取用户信息失败: %w", err)
+	}
+
+	merchantIdStr, ok := userData["merchant_id"]
+	if !ok {
+		return nil, errors.New("用户信息缺少 merchant_id")
+	}
+
+	merchantId, err := strconv.ParseUint(merchantIdStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("merchant_id 解析失败: %w", err)
+	}
+
+	merchantKey := "merchant:" + strconv.FormatUint(merchantId, 10)
+	merchantData, err := rdb.HGetAll(ctx, merchantKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("获取商户信息失败: %w", err)
+	}
+
 	var user MerchantUser
-	if err := rdb.HGetAll(ctx, key).Scan(&user); err != nil {
+	if err := scanMapToStruct(userData, &user); err != nil {
 		return nil, fmt.Errorf("反序列化用户信息失败: %w", err)
 	}
+
 	var merchant Merchant
-	if err := rdb.HGetAll(ctx, key).Scan(&merchant); err != nil {
+	if err := scanMapToStruct(merchantData, &merchant); err != nil {
 		return nil, fmt.Errorf("反序列化商户信息失败: %w", err)
 	}
-	userAuth := &UserAuth{
+
+	return &UserAuth{
 		Id:         user.Id,
 		MerchantId: user.MerchantId,
 		PlayerId:   user.PlayerId,
@@ -57,26 +84,77 @@ func GetUserByToken(rdb *redis.Client, tokenString string) (*UserAuth, error) {
 		Avatar:     user.Avatar,
 		HookUrl:    merchant.HookUrl,
 		HomeUrl:    merchant.HomeUrl,
-	}
-	return userAuth, nil
+	}, nil
 }
 
-func GetMerchant(rdb *redis.Client, merchantId uint64) (*Merchant, error) {
-	ctx := context.Background()
-	key := "merchant:" + strconv.FormatUint(merchantId, 10)
-	exists, err := rdb.Exists(ctx, key).Result()
-	if err != nil {
-		return nil, err
+// scanMapToStruct 将 Redis HGETALL 的 map 结果扫描到结构体
+func scanMapToStruct(m map[string]string, v interface{}) error {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Ptr {
+		return errors.New("v must be a pointer")
 	}
-	if exists == 0 {
-		return nil, errors.New("token 不存在或已过期")
+	rv = rv.Elem()
+	rt := rv.Type()
+
+	for i := 0; i < rt.NumField(); i++ {
+		field := rv.Field(i)
+		fieldType := rt.Field(i)
+
+		// 优先获取 gorm tag 中的 column 值
+		tag := fieldType.Tag.Get("gorm")
+		colName := parseGormColumn(tag)
+
+		if colName != "" && field.CanSet() {
+			if val, ok := m[colName]; ok {
+				setFieldValue(field, val)
+			}
+		}
 	}
-	var merchant Merchant
-	if err := rdb.HGetAll(ctx, key).Scan(&merchant); err != nil {
-		return nil, fmt.Errorf("反序列化商户信息失败: %w", err)
-	}
-	return &merchant, nil
+	return nil
 }
+
+// parseGormColumn 从 gorm tag 中提取 column 值
+func parseGormColumn(tag string) string {
+	for _, part := range strings.Split(tag, ";") {
+		kv := strings.Split(strings.TrimSpace(part), ":")
+		if len(kv) == 2 && strings.TrimSpace(kv[0]) == "column" {
+			return strings.TrimSpace(kv[1])
+		}
+	}
+	return ""
+}
+
+// setFieldValue 根据字段类型设置值
+func setFieldValue(field reflect.Value, val string) {
+	switch field.Kind() {
+	case reflect.Uint64:
+		if v, err := strconv.ParseUint(val, 10, 64); err == nil {
+			field.SetUint(v)
+		}
+	case reflect.Uint:
+		if v, err := strconv.ParseUint(val, 10, 64); err == nil {
+			field.SetUint(v)
+		}
+	case reflect.Int:
+		if v, err := strconv.Atoi(val); err == nil {
+			field.SetInt(int64(v))
+		}
+	case reflect.Int8:
+		if v, err := strconv.ParseInt(val, 10, 8); err == nil {
+			field.SetInt(v)
+		}
+	case reflect.String:
+		field.SetString(val)
+	case reflect.Bool:
+		if v, err := strconv.ParseBool(val); err == nil {
+			field.SetBool(v)
+		}
+	}
+}
+
+// ==========================================
+// JWT Token 管理
+// ==========================================
 
 // GenerateSessionToken 签发游戏会话 JWT token (标准有效期 2 小时)
 func GenerateSessionToken(userAuth UserAuth) (string, error) {
@@ -102,16 +180,12 @@ func VerifySessionToken(tokenString string) (*JwtClaims, error) {
 	if claims, ok := token.Claims.(*JwtClaims); ok && token.Valid {
 		return claims, nil
 	}
-	return nil, fmt.Errorf("invalid token claims")
+	return nil, errors.New("invalid token claims")
 }
 
 // ==========================================
-// 2. Redis 安全总线（同步与监听广播）
+// Redis 安全总线（同步与监听广播）
 // ==========================================
-
-// 假设你的全局 Map 定义如下（请确保 Key 的类型是 uint64）：
-// var localPlayerBlacklist = make(map[uint64]struct{})
-// var localMerchantBlacklist = make(map[uint64]struct{})
 
 // InitSecurityBus 在游戏服务启动时调用，加载历史状态并订阅秒级拉黑通道
 func InitSecurityBus(rdb *redis.Client) {
@@ -122,16 +196,13 @@ func InitSecurityBus(rdb *redis.Client) {
 	bannedMerchants, _ := rdb.SMembers(ctx, "global:blacklist:merchant").Result()
 
 	blacklistMu.Lock()
-	// 修复点：显式声明为 int64，统一内存中的数据类型
 	for _, pidStr := range bannedPlayers {
-		var pid uint64
-		if _, err := fmt.Sscanf(pidStr, "%d", &pid); err == nil {
+		if pid, err := strconv.ParseUint(pidStr, 10, 64); err == nil {
 			localPlayerBlacklist[pid] = struct{}{}
 		}
 	}
 	for _, midStr := range bannedMerchants {
-		var mid uint64
-		if _, err := fmt.Sscanf(midStr, "%d", &mid); err == nil {
+		if mid, err := strconv.ParseUint(midStr, 10, 64); err == nil {
 			localMerchantBlacklist[mid] = struct{}{}
 		}
 	}
@@ -140,7 +211,7 @@ func InitSecurityBus(rdb *redis.Client) {
 	// B. 异步监听：基于长连接订阅实时熔断广播
 	go listenChannel(rdb, "chan:player_ban", func(pid uint64) {
 		blacklistMu.Lock()
-		localPlayerBlacklist[pid] = struct{}{} // 现在这里完美契合 int64 的 map 了
+		localPlayerBlacklist[pid] = struct{}{}
 		blacklistMu.Unlock()
 	})
 
@@ -151,25 +222,23 @@ func InitSecurityBus(rdb *redis.Client) {
 	})
 }
 
-// 内部低级监听工具
+// listenChannel 内部低级监听工具
 func listenChannel(rdb *redis.Client, channel string, onMessage func(id uint64)) {
 	pubSub := rdb.Subscribe(context.Background(), channel)
-	defer func(pubSub *redis.PubSub) {
-		_ = pubSub.Close()
-	}(pubSub)
+	defer pubSub.Close()
 
 	for msg := range pubSub.Channel() {
-		var id uint64
-		if _, err := fmt.Sscanf(msg.Payload, "%d", &id); err == nil {
+		if id, err := strconv.ParseUint(msg.Payload, 10, 64); err == nil {
 			onMessage(id)
 		}
 	}
 }
 
 // ==========================================
-// 3. 内存快检拦截（读写分离锁，耗时微秒级）
+// 内存快检拦截（读写分离锁，耗时微秒级）
 // ==========================================
 
+// IsMerchantBanned 检查商户是否被封禁
 func IsMerchantBanned(mid uint64) bool {
 	blacklistMu.RLock()
 	defer blacklistMu.RUnlock()
@@ -177,6 +246,7 @@ func IsMerchantBanned(mid uint64) bool {
 	return banned
 }
 
+// IsPlayerBanned 检查玩家是否被封禁
 func IsPlayerBanned(pid uint64) bool {
 	blacklistMu.RLock()
 	defer blacklistMu.RUnlock()
@@ -184,12 +254,18 @@ func IsPlayerBanned(pid uint64) bool {
 	return banned
 }
 
+// ==========================================
+// 统一错误响应（兼容 darkit-gin API 风格）
+// ==========================================
+
+// Error 返回统一错误格式
+// 兼容 darkit-gin 的 ErrorResponse 语义
 func Error(c *gin.Context, httpCode, bizCode int, message string) {
 	if message == "" {
 		if msg, ok := MessageAuth[bizCode]; ok {
 			message = msg
 		} else {
-			message = "Unknow"
+			message = "UNKNOWN_ERROR"
 		}
 	}
 	c.JSON(httpCode, ErrResp{
@@ -198,10 +274,24 @@ func Error(c *gin.Context, httpCode, bizCode int, message string) {
 	})
 }
 
-func TokenSuccess(c *gin.Context, tokenData TokenData) {
-	c.JSON(http.StatusOK, TokenResp{
-		Code:    Success,
-		Message: MessageAuth[Success],
-		Data:    tokenData,
+// TokenSuccess 返回 Token 获取成功
+// 兼容 darkit-gin 的 Created 语义
+func TokenSuccess(c *gin.Context, data TokenData) {
+	c.JSON(200, gin.H{
+		"code":    CodeSuccess,
+		"message": MessageAuth[CodeSuccess],
+		"data": gin.H{
+			"token": data.Token,
+			"user":  data.User,
+		},
+	})
+}
+
+// Success 返回统一成功格式
+func Success(c *gin.Context, data interface{}) {
+	c.JSON(200, gin.H{
+		"code":    CodeSuccess,
+		"message": MessageAuth[CodeSuccess],
+		"data":    data,
 	})
 }

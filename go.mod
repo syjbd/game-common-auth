@@ -2,10 +2,9 @@ module github.com/syjbd/game-common-auth
 
 go 1.25.0
 
-require github.com/golang-jwt/jwt/v5 v5.3.1
-
 require (
 	github.com/gin-gonic/gin v1.12.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/redis/go-redis/v9 v9.19.0
 )
 
@@ -42,3 +41,7 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
+
+// NOTE: darkit/gin 未发布正式版本 (github.com/DarkiT/gin)
+// 如需使用 darkit/gin，请在项目中使用 replace 指令：
+// replace github.com/darkit/gin => 实际路径或使用 GOPRIVATE 配置私有仓库
