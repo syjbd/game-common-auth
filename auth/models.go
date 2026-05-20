@@ -17,6 +17,10 @@ type MerchantUser struct {
 	UpdatedAt  time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 
+func (MerchantUser) TableName() string {
+	return "merchants_users"
+}
+
 type Merchant struct {
 	Id           uint64    `gorm:"primaryKey;autoIncrement;column:id"`
 	MerchantCode string    `gorm:"column:merchant_code;type:varchar(30);not null"`
@@ -28,6 +32,10 @@ type Merchant struct {
 	Status       int8      `gorm:"column:status;type:tinyint;default:1"` // 1-启用, 0-禁用
 	CreatedAt    time.Time `gorm:"column:created_at;autoCreateTime"`
 	UpdatedAt    time.Time `gorm:"column:updated_at;autoUpdateTime"`
+}
+
+func (Merchant) TableName() string {
+	return "merchants"
 }
 
 type JwtClaims struct {
