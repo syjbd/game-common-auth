@@ -2,5 +2,5 @@
 
 ## 获取公共包
 ```shell
-go get github.com/你的用户名/gin-timer@v1.0.0
+go get github.com/syjbd/game-common-auth@v1.0.0
 ```
