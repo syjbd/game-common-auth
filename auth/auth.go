@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
 )
@@ -28,7 +31,7 @@ func SetJWTSecret(secret string) {
 	}
 }
 
-func GetUserByToken(rdb *redis.Client, tokenString string) (*MerchantUser, error) {
+func GetUserByToken(rdb *redis.Client, tokenString string) (*UserAuth, error) {
 	ctx := context.Background()
 	key := tokenString
 	exists, err := rdb.Exists(ctx, key).Result()
@@ -42,13 +45,43 @@ func GetUserByToken(rdb *redis.Client, tokenString string) (*MerchantUser, error
 	if err := rdb.HGetAll(ctx, key).Scan(&user); err != nil {
 		return nil, fmt.Errorf("反序列化用户信息失败: %w", err)
 	}
-	return &user, nil
+	var merchant Merchant
+	if err := rdb.HGetAll(ctx, key).Scan(&merchant); err != nil {
+		return nil, fmt.Errorf("反序列化商户信息失败: %w", err)
+	}
+	userAuth := &UserAuth{
+		Id:         user.Id,
+		MerchantId: user.MerchantId,
+		PlayerId:   user.PlayerId,
+		Username:   user.Username,
+		Avatar:     user.Avatar,
+		HookUrl:    merchant.HookUrl,
+		HomeUrl:    merchant.HomeUrl,
+	}
+	return userAuth, nil
+}
+
+func GetMerchant(rdb *redis.Client, merchantId uint64) (*Merchant, error) {
+	ctx := context.Background()
+	key := "merchant:" + strconv.FormatUint(merchantId, 10)
+	exists, err := rdb.Exists(ctx, key).Result()
+	if err != nil {
+		return nil, err
+	}
+	if exists == 0 {
+		return nil, errors.New("token 不存在或已过期")
+	}
+	var merchant Merchant
+	if err := rdb.HGetAll(ctx, key).Scan(&merchant); err != nil {
+		return nil, fmt.Errorf("反序列化商户信息失败: %w", err)
+	}
+	return &merchant, nil
 }
 
 // GenerateSessionToken 签发游戏会话 JWT token (标准有效期 2 小时)
-func GenerateSessionToken(merchantUser MerchantUser) (string, error) {
+func GenerateSessionToken(userAuth UserAuth) (string, error) {
 	claims := JwtClaims{
-		MerchantUser: merchantUser,
+		UserAuth: userAuth,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -149,4 +182,26 @@ func IsPlayerBanned(pid uint64) bool {
 	defer blacklistMu.RUnlock()
 	_, banned := localPlayerBlacklist[pid]
 	return banned
+}
+
+func Error(c *gin.Context, httpCode, bizCode int, message string) {
+	if message == "" {
+		if msg, ok := MessageAuth[bizCode]; ok {
+			message = msg
+		} else {
+			message = "Unknow"
+		}
+	}
+	c.JSON(httpCode, ErrResp{
+		Code:    bizCode,
+		Message: message,
+	})
+}
+
+func TokenSuccess(c *gin.Context, tokenData TokenData) {
+	c.JSON(http.StatusOK, TokenResp{
+		Code:    Success,
+		Message: MessageAuth[Success],
+		Data:    tokenData,
+	})
 }

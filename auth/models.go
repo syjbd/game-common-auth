@@ -38,7 +38,51 @@ func (Merchant) TableName() string {
 	return "merchants"
 }
 
+type UserAuth struct {
+	Id         uint64
+	MerchantId uint64
+	PlayerId   string
+	Username   string
+	Avatar     string
+	HookUrl    string
+	HomeUrl    string
+}
+
 type JwtClaims struct {
-	MerchantUser
+	UserAuth
 	jwt.RegisteredClaims
+}
+
+type ErrResp struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type TokenData struct {
+	User  UserAuth
+	Token string
+}
+
+type TokenResp struct {
+	Code    int       `json:"code"`
+	Message string    `json:"message"`
+	Data    TokenData `json:"data"`
+}
+
+const (
+	Success           = 200
+	TokenError        = 4000
+	Unauthorized      = 4001
+	InvalidToken      = 4002
+	MerchantSuspended = 4003
+	PlayerLocked      = 4004
+)
+
+var MessageAuth = map[int]string{
+	Success:           "SUCCESS",
+	TokenError:        "TOKEN_ERROR",
+	Unauthorized:      "UNAUTHORIZED",
+	InvalidToken:      "INVALID_TOKEN",
+	MerchantSuspended: "MERCHANT_SUSPENDED",
+	PlayerLocked:      "PLAYER_LOCKED",
 }
